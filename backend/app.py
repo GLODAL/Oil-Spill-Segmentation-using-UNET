@@ -1,0 +1,792 @@
+"""
+Oil Spill Segmentation Viewer — FastAPI Backend (OPTIMIZED)
+============================================================
+KEY IMPROVEMENTS:
+  ✓ TIF → NumPy array read (decimated) to avoid overlay complexity
+  ✓ QGIS-style MINMAX stretch (true min/max of valid pixels)
+  ✓ Fast mask binary thresholding (>= 128) 
+  ✓ Proper WarpedVRT bounds matching for SAR + Mask alignment
+  ✓ Aggressive caching to skip re-renders
+  ✓ Per-layer bounds stored separately for perfect overlay
+"""
+
+import os, sys
+from pathlib import Path
+
+def _fix_proj():
+    """Auto-locate PROJ database before rasterio import"""
+    candidates = [
+        r"C:\ProgramData\anaconda3\Library\share\proj",
+        str(Path(sys.executable).parent.parent / "Library" / "share" / "proj"),
+        r"C:\ProgramData\miniconda3\Library\share\proj",
+    ]
+    for c in candidates:
+        if (Path(c) / "proj.db").exists():
+            os.environ["PROJ_DATA"] = c
+            os.environ["PROJ_LIB"]  = c
+            os.environ["GDAL_DATA"] = c.replace("proj", "gdal")
+            print(f"[PROJ] OK: {c}", flush=True)
+            return
+    print("[PROJ] WARN: Anaconda proj.db not found", flush=True)
+
+_fix_proj()
+os.environ["PROJ_NETWORK"] = "OFF"
+
+import json, logging, re, tempfile, time
+from datetime import datetime, timezone
+from io import BytesIO
+
+import boto3
+import numpy as np
+import rasterio
+from rasterio.enums import Resampling
+from rasterio.vrt import WarpedVRT
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from PIL import Image
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("oilspill_viewer")
+
+import warnings
+warnings.filterwarnings("ignore", message=".*proj.*", category=UserWarning)
+
+# =============================================================================
+# CONFIG
+# =============================================================================
+S3_ENDPOINT  = os.environ.get("S3_ENDPOINT",  "https://rgw.glodal-inc.net")
+S3_BUCKET    = os.environ.get("S3_BUCKET",    "Inference_Oil_Spill_segmentation")
+S3_SAR_ROOT  = os.environ.get("S3_SAR_ROOT",  "oil_spill_brazil/Output/Preprocess_After_SNAP_")
+S3_MASK_ROOT  = os.environ.get("S3_MASK_ROOT",  "oil_spill_brazil/Output/Oil_Spill_Postprocessed_v15")
+S3_CACHE_ROOT = os.environ.get("S3_CACHE_ROOT", "oil_spill_brazil/Output/Viewer_Cache_Final")
+USE_S3_CACHE  = os.environ.get("USE_S3_CACHE", "true").lower() == "true"
+MASK_COLOR_RGBA = (245, 166, 35, 235)  # amber — matches legend
+
+AWS_ACCESS_KEY_ID     = os.environ.get("AWS_ACCESS_KEY_ID",     "")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+
+CACHE_DIR          = Path(os.environ.get("OILSENSE_CACHE_DIR",
+                          str(Path(__file__).parent / "cache")))
+SCENE_LIST_TTL_SEC = int(os.environ.get("SCENE_LIST_TTL_SEC", "120"))
+
+# SAR render settings
+MAX_SAR_DIM   = int(os.environ.get("MAX_SAR_DIM", "3000"))
+SAR_STRETCH_MODE = os.environ.get("SAR_STRETCH_MODE", "minmax")
+SAR_STRETCH_PCT  = (
+    float(os.environ.get("SAR_STRETCH_LO", "2")),
+    float(os.environ.get("SAR_STRETCH_HI", "98")),
+)
+
+MASK_THRESHOLD = 128  # Binary mask: >= 128 = oil
+
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# S3 config
+_ep = S3_ENDPOINT.replace("https://", "").replace("http://", "")
+os.environ.setdefault("AWS_S3_ENDPOINT",                _ep)
+os.environ.setdefault("AWS_HTTPS",                      "YES")
+os.environ.setdefault("AWS_VIRTUAL_HOSTING",            "FALSE")
+os.environ.setdefault("AWS_DEFAULT_REGION",             "us-east-1")
+os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN",   "EMPTY_DIR")
+os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff")
+# Stream reads directly from S3 instead of downloading the whole 2GB file:
+# GDAL's /vsis3/ driver issues ranged HTTP GETs, and since render_*_png only
+# needs a decimated (max_dim-capped) array, this pulls down only the bytes
+# needed for the overview/decimated read — typically tens of MB, not 2GB.
+os.environ.setdefault("CPL_VSIL_CURL_CACHE_SIZE",       "200000000")  # 200MB curl cache
+os.environ.setdefault("VSI_CACHE",                      "TRUE")
+os.environ.setdefault("VSI_CACHE_SIZE",                  "100000000")  # 100MB per-handle cache
+os.environ.setdefault("GDAL_HTTP_MULTIPLEX",             "YES")
+os.environ.setdefault("GDAL_HTTP_VERSION",               "2")
+USE_VSIS3 = os.environ.get("OILSENSE_USE_VSIS3", "1") == "1"
+if AWS_ACCESS_KEY_ID:     os.environ["AWS_ACCESS_KEY_ID"]     = AWS_ACCESS_KEY_ID
+if AWS_SECRET_ACCESS_KEY: os.environ["AWS_SECRET_ACCESS_KEY"] = AWS_SECRET_ACCESS_KEY
+
+# WKT CRS — avoids EPSG lookup
+WKT_4326 = (
+    'GEOGCS["WGS 84",DATUM["WGS_1984",'
+    'SPHEROID["WGS 84",6378137,298.257223563]],'
+    'PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]'
+)
+
+def crs_4326():
+    return rasterio.crs.CRS.from_wkt(WKT_4326)
+
+# =============================================================================
+# S3 HELPERS
+# =============================================================================
+DATE_KEY = re.compile(
+    r"(\d{8}T\d{6}_\d{8}T\d{6}_[0-9A-Fa-f]{6}_[0-9A-Fa-f]{6}_[0-9A-Fa-f]{4})"
+)
+
+def date_key(name):
+    m = DATE_KEY.search(name)
+    return m.group(1) if m else None
+
+def scene_id_from_mask_key(key):
+    base = os.path.basename(key)
+    return base[:-len("_clean.tif")] if base.endswith("_clean.tif") else Path(base).stem
+
+def parse_dt(dk):
+    try: return datetime.strptime(dk.split("_")[0], "%Y%m%dT%H%M%S")
+    except: return None
+
+def _s3():
+    return boto3.client("s3", endpoint_url=S3_ENDPOINT,
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name="us-east-1")
+
+def _download(key, suffix=".tif"):
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    tmp.close()
+    log.info("Downloading s3://%s/%s → %s", S3_BUCKET, key, tmp.name)
+    _s3().download_file(S3_BUCKET, key, tmp.name)
+    return tmp.name
+
+def _vsis3_path(key):
+    """GDAL virtual filesystem path for streaming reads (no full download)."""
+    return f"/vsis3/{S3_BUCKET}/{key}"
+
+class RasterSource:
+    """
+    Context manager yielding a path GDAL/rasterio can open for `key`.
+    Tries streaming via /vsis3/ first (only pulls the bytes actually needed
+    for a decimated/overview read — fast, low bandwidth). Falls back to a
+    full local download if vsis3 access fails (e.g. permissions, endpoint
+    quirks, or non-S3-compatible storage).
+    """
+    def __init__(self, key, suffix=".tif"):
+        self.key = key
+        self.suffix = suffix
+        self.local_path = None
+        self.used_download = False
+
+    def __enter__(self):
+        if USE_VSIS3:
+            return _vsis3_path(self.key)
+        self.local_path = _download(self.key, self.suffix)
+        self.used_download = True
+        return self.local_path
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.used_download and self.local_path:
+            try: os.unlink(self.local_path)
+            except: pass
+        return False
+
+    def fallback_download(self):
+        """Call when the vsis3 path failed to open; downloads and returns a local path."""
+        self.local_path = _download(self.key, self.suffix)
+        self.used_download = True
+        return self.local_path
+
+    def cleanup(self):
+        if self.used_download and self.local_path:
+            try: os.unlink(self.local_path)
+            except: pass
+            self.local_path = None
+
+
+def open_for_read(key, suffix=".tif"):
+    """
+    Returns a path usable by rasterio.open(). Tries /vsis3/ streaming first;
+    if that raises, transparently falls back to a full S3 download.
+    Caller is responsible for calling cleanup_path() afterwards.
+    """
+    if USE_VSIS3:
+        path = _vsis3_path(key)
+        try:
+            with rasterio.open(path):
+                pass
+            return path, False
+        except Exception as e:
+            log.warning("vsis3 stream open failed (%s), falling back to download: %s", key, e)
+    local = _download(key, suffix)
+    return local, True
+
+
+def cleanup_path(path, was_download):
+    if was_download:
+        try: os.unlink(path)
+        except: pass
+
+# =============================================================================
+# RASTER HELPERS
+# =============================================================================
+
+def _sar_stretch(vals: np.ndarray):
+    """QGIS Min/Max stretch: true min/max of valid pixels."""
+    if vals.size == 0:
+        return -25.0, 0.0
+    if SAR_STRETCH_MODE == "minmax":
+        lo, hi = float(vals.min()), float(vals.max())
+    else:
+        lo, hi = np.percentile(vals, SAR_STRETCH_PCT)
+    if hi <= lo:
+        hi = lo + 1e-6
+    return lo, hi
+
+
+def read_tif_to_array(local_path: str, max_dim: int = MAX_SAR_DIM):
+    """
+    TIF → NumPy array with bounds (WGS84).
+    Returns (array float32 with NaN outside the real footprint, bounds (s,w,n,e), source_crs)
+    
+    Uses WarpedVRT for on-the-fly reprojection to WGS84.
+
+    NOTE on nodata / warp-fill: SNAP-exported Sigma0 SAR TIFs frequently
+    have no nodata tag, and GDAL reports such files as "all valid" —
+    meaning it has no on-disk way to distinguish genuine 0.0 backscatter
+    from the 0.0 it fills into warp-output pixels with no source
+    coverage (the source grid is often rotated relative to true north,
+    so warping to WGS84 leaves real corner/edge gaps). dataset_mask()
+    does not help here since it reflects the same all-valid metadata.
+
+    Fix: pass a sentinel destination nodata value to WarpedVRT (with
+    src_nodata=None, so nothing in the source itself is masked) — GDAL
+    then fills only the genuinely-uncovered output pixels with that
+    sentinel, which we convert to NaN afterward. The sentinel sits far
+    outside any plausible Sigma0 SAR value range.
+    """
+    dst_crs = crs_4326()
+    SENTINEL = -9999.0
+    
+    with rasterio.open(local_path) as src:
+        src_crs = src.crs
+        nodata  = src.nodata
+        is_unsigned = np.issubdtype(np.dtype(src.dtypes[0]), np.unsignedinteger)
+
+        if nodata is not None:
+            warp_src_nodata = nodata
+            warp_dst_nodata = nodata
+        elif is_unsigned:
+            warp_src_nodata = None
+            warp_dst_nodata = 0
+        else:
+            warp_src_nodata = None
+            warp_dst_nodata = SENTINEL
+
+        with WarpedVRT(src, crs=dst_crs, resampling=Resampling.bilinear,
+                       src_nodata=warp_src_nodata, nodata=warp_dst_nodata) as vrt:
+            
+            # Compute decimation scale
+            scale  = min(1.0, max_dim / max(vrt.width, vrt.height))
+            out_h  = max(1, int(round(vrt.height * scale)))
+            out_w  = max(1, int(round(vrt.width  * scale)))
+            
+            # Read decimated array
+            data = vrt.read(
+                1,
+                out_shape=(out_h, out_w),
+                resampling=Resampling.bilinear,
+            ).astype(np.float32)
+            
+            # Bounds from VRT transform
+            vrt_tf = vrt.transform
+            west   = vrt_tf.c
+            north  = vrt_tf.f
+            
+            # Pixel size in decimated output
+            px_w   = vrt_tf.a * (vrt.width / out_w)
+            px_h   = vrt_tf.e * (vrt.height / out_h)
+            
+            east   = west + out_w * px_w
+            south  = north + out_h * px_h
+            
+            bounds = (south, west, north, east)
+
+            # Replace the (now unambiguous) warp-fill/nodata sentinel with NaN
+            data = np.where(data == warp_dst_nodata, np.nan, data)
+    
+    return data, bounds, src_crs
+
+
+def render_sar_png(local_path: str, max_dim: int = MAX_SAR_DIM):
+    """
+    SAR TIF → RGBA PNG with QGIS-style MINMAX stretch.
+    Returns (png_bytes, bounds).
+    Uses RGBA (not plain "L" grayscale) so pixels outside the real SAR
+    swath footprint are transparent instead of opaque black — otherwise
+    they fully obscure the basemap/other layers underneath in Leaflet.
+    """
+    log.info("  Reading SAR TIF → array...")
+    sar, bounds, _ = read_tif_to_array(local_path, max_dim)
+    
+    # QGIS stretch
+    valid = sar[np.isfinite(sar)]
+    lo, hi = _sar_stretch(valid)
+    log.info("    SAR range: %.2f - %.2f (stretched %.2f - %.2f)", 
+             valid.min(), valid.max(), lo, hi)
+    
+    # Normalize to 0-255
+    sar_norm = np.clip((sar - lo) / (hi - lo + 1e-8) * 255, 0, 255)
+    sar_norm = np.nan_to_num(sar_norm, nan=0).astype(np.uint8)
+    alpha = np.where(np.isfinite(sar), 255, 0).astype(np.uint8)
+
+    rgba = np.stack([sar_norm, sar_norm, sar_norm, alpha], axis=-1)
+    img = Image.fromarray(rgba, mode="RGBA")
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    return bio.getvalue(), bounds
+
+
+def render_mask_png(local_path: str, max_dim: int = MAX_SAR_DIM):
+    """
+    Mask TIF → amber RGBA PNG. Pixels >= MASK_THRESHOLD become opaque
+    amber; everything else (no oil, AND outside the real footprint) is
+    fully transparent so the basemap/SAR layer shows through.
+    Returns (png_bytes, bounds).
+    """
+    log.info("  Reading mask TIF → array...")
+    mask, bounds, _ = read_tif_to_array(local_path, max_dim)
+    
+    # Binary threshold — NaN (outside footprint) safely becomes False here
+    oil = np.nan_to_num(mask, nan=0) >= MASK_THRESHOLD
+    
+    log.info("    Oil pixels: %d / %d (%.2f%%)",
+             int(oil.sum()),
+             oil.size,
+             100.0 * oil.sum() / oil.size)
+
+    h, w = oil.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[oil, 0] = 245
+    rgba[oil, 1] = 166
+    rgba[oil, 2] = 35
+    rgba[oil, 3] = 235
+    # everywhere else (no oil, or outside footprint) stays alpha=0
+
+    img = Image.fromarray(rgba, mode="RGBA")
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    return bio.getvalue(), bounds
+
+
+def compute_oil_stats(local_path: str):
+    """
+    Oil coverage statistics computed from the ORIGINAL TIF before reprojection.
+
+    Why original TIF:
+      - After WarpedVRT reprojection to WGS84, pixel spacing is in degrees
+        (~0.000089°) not metres, so multiplying by a fixed pixel size gives
+        wrong results.
+      - The original SNAP-exported Sentinel-1 GRDH is in UTM (projected,
+        metres). Pixel spacing from src.transform gives the true ground area.
+
+    Sentinel-1 GRDH pixel spacing:
+      - Nominally 10 m × 10 m after SNAP processing.
+      - Confirmed at runtime from src.transform.a / src.transform.e.
+
+    Coverage denominator:
+      - Uses valid (finite, non-nodata) pixels only — outside-swath
+        transparent pixels must NOT count toward the scene total.
+    """
+    with rasterio.open(local_path) as src:
+        tr  = src.transform
+        crs = src.crs
+        pw  = abs(float(tr.a))   # pixel width  in CRS units
+        ph  = abs(float(tr.e))   # pixel height in CRS units
+        log.info("    Mask CRS: %s | pixel: %.4f × %.4f %s",
+                 crs.to_string() if crs else "None", pw, ph,
+                 "m" if (crs and crs.is_projected) else "deg")
+
+        data = src.read(1).astype(np.float32)
+        nd   = src.nodata
+        if nd is not None:
+            data = np.where(data == nd, np.nan, data)
+
+    oil_px   = int(np.sum(data >= MASK_THRESHOLD))
+    # valid = finite pixels (inside the actual SAR swath)
+    valid_px = int(np.isfinite(data).sum())
+    total_px = int(data.size)
+
+    if crs and crs.is_projected:
+        # CRS is in metres (UTM) — direct area calculation
+        area_m2  = oil_px * pw * ph
+    else:
+        # CRS is geographic (degrees) — convert using mid-latitude scale
+        b    = rasterio.transform.array_bounds(data.shape[0], data.shape[1], tr)
+        mlat = (b[1] + b[3]) / 2.0
+        mx   = 111_320.0 * np.cos(np.radians(mlat))   # m per degree longitude
+        my   = 111_320.0                               # m per degree latitude
+        area_m2 = oil_px * (pw * mx) * (ph * my)
+
+    area_km2 = area_m2 / 1e6
+    # Coverage over valid (in-swath) pixels only — outside-swath pixels
+    # are transparent in the viewer and should not dilute the percentage.
+    cov_pct  = 100.0 * oil_px / valid_px if valid_px > 0 else 0.0
+
+    log.info("    Stats: oil=%d px | valid=%d px | area=%.3f km² | cov=%.4f%%",
+             oil_px, valid_px, area_km2, cov_pct)
+
+    return {
+        "oil_pixels":   oil_px,
+        "valid_pixels": valid_px,
+        "total_pixels": total_px,
+        "oil_area_km2": round(area_km2, 3),
+        "coverage_pct": round(cov_pct, 4),
+        "pixel_size_m": round(pw, 2) if (crs and crs.is_projected) else None,
+    }
+
+
+def get_wgs84_bounds_fast(mask_key: str):
+    """Get bounds from mask S3 key (fast lookup, streamed via vsis3)."""
+    path, was_dl = open_for_read(mask_key)
+    try:
+        _, bounds, _ = read_tif_to_array(path, max_dim=1024)
+        return bounds
+    finally:
+        cleanup_path(path, was_dl)
+
+
+# =============================================================================
+# SCENE CACHE
+# =============================================================================
+_scene_cache = {"scenes": [], "ts": 0}
+
+def _load_bc():
+    p = CACHE_DIR / "bounds_cache.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+
+def _save_bc(bc):
+    (CACHE_DIR / "bounds_cache.json").write_text(json.dumps(bc))
+
+
+def list_scenes(force=False):
+    global _scene_cache
+    
+    if (not force and _scene_cache["scenes"] and 
+        time.time() - _scene_cache["ts"] < SCENE_LIST_TTL_SEC):
+        return _scene_cache["scenes"]
+    
+    log.info("Listing scenes from S3...")
+    pag = _s3().get_paginator("list_objects_v2")
+    
+    mask_keys = [
+        obj["Key"] for pg in pag.paginate(Bucket=S3_BUCKET, Prefix=S3_MASK_ROOT)
+        for obj in pg.get("Contents", [])
+        if obj["Key"].lower().endswith("_clean.tif")
+    ]
+    
+    sar_index = {}
+    for pg in pag.paginate(Bucket=S3_BUCKET, Prefix=S3_SAR_ROOT):
+        for obj in pg.get("Contents", []):
+            k = obj["Key"]
+            if k.lower().endswith(".tif"):
+                dk = date_key(os.path.basename(k))
+                if dk:
+                    sar_index[dk] = k
+    
+    bc = _load_bc()
+    bc_dirty = False
+    scenes = []
+    
+    for mk in sorted(mask_keys):
+        sid   = scene_id_from_mask_key(mk)
+        dk    = date_key(os.path.basename(mk))
+        sar_k = sar_index.get(dk) if dk else None
+        dt    = parse_dt(dk) if dk else None
+        bounds = bc.get(sid)
+        
+        if bounds is None:
+            try:
+                bounds = get_wgs84_bounds_fast(mk)
+                bc[sid] = bounds
+                bc_dirty = True
+            except Exception:
+                log.exception("Bounds failed: %s", mk)
+        
+        scenes.append({
+            "scene_id": sid,
+            "date_key": dk,
+            "date": dt.strftime("%Y-%m-%d") if dt else None,
+            "time": dt.strftime("%H:%M:%S") if dt else None,
+            "mask_key": mk,
+            "sar_key": sar_k,
+            "has_sar": sar_k is not None,
+            "bounds": bounds,
+            "center": [(bounds[0]+bounds[2])/2, (bounds[1]+bounds[3])/2]
+                      if bounds else None,
+        })
+    
+    if bc_dirty:
+        _save_bc(bc)
+    
+    scenes.sort(key=lambda s: s["date_key"] or "", reverse=True)
+    _scene_cache.update({"scenes": scenes, "ts": time.time()})
+    
+    log.info("Indexed %d scenes, %d with SAR",
+             len(scenes), sum(s["has_sar"] for s in scenes))
+    return scenes
+
+
+def find_scene(sid):
+    for s in list_scenes():
+        if s["scene_id"] == sid:
+            return s
+    for s in list_scenes(force=True):
+        if s["scene_id"] == sid:
+            return s
+    return None
+
+
+# =============================================================================
+# OVERLAY GENERATION
+# =============================================================================
+def get_overlay(sid: str):
+    scene = find_scene(sid)
+    if not scene:
+        raise HTTPException(404, f"Scene '{sid}' not found")
+
+    # ── Check S3 pre-cache first (generated by precache_for_viewer.py on JupyterHub) ──
+    if USE_S3_CACHE:
+        try:
+            s3c = _s3()
+            meta_s3_key = f"{S3_CACHE_ROOT}/{sid}/meta.json"
+            resp = s3c.get_object(Bucket=S3_BUCKET, Key=meta_s3_key)
+            meta = json.loads(resp["Body"].read())
+            # Rewrite URLs to go through our proxy (avoids CORS / auth issues)
+            meta["sar_png_url"]  = f"/api/scene/{sid}/sar.png"  if meta.get("has_sar") else None
+            meta["mask_png_url"] = f"/api/scene/{sid}/mask.png"
+            log.info("  ✓ Serving %s from S3 pre-cache", sid)
+            return meta
+        except Exception as e:
+            # IMPORTANT: don't swallow this silently. If S3 pre-cache lookup
+            # fails for a reason other than "key doesn't exist yet" (auth,
+            # network, wrong bucket/root, etc.) we fall through to slow
+            # on-demand rendering AND may pick up a stale local disk cache
+            # without any visible signal as to why. Log it so it's diagnosable.
+            log.warning("  S3 pre-cache lookup failed for %s (key=%s): %s — "
+                        "falling back to local cache / on-demand render",
+                        sid, meta_s3_key, e)
+
+    out_dir = CACHE_DIR / sid
+    out_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = out_dir / "meta.json"
+    sar_png = out_dir / "sar.png"
+    mask_png = out_dir / "mask.png"
+    
+    # Return local disk cached if complete
+    all_cached = (meta_path.exists() and mask_png.exists()
+                  and (not scene["has_sar"] or sar_png.exists()))
+    if all_cached:
+        return json.loads(meta_path.read_text())
+    
+    bounds_sar = None
+    bounds_mask = None
+    stats = None
+
+    def _render_sar():
+        nonlocal bounds_sar
+        if not (scene["has_sar"] and not sar_png.exists()):
+            return
+        log.info("Rendering SAR for %s ...", sid)
+        path, was_dl = open_for_read(scene["sar_key"])
+        try:
+            png, b = render_sar_png(path)
+            sar_png.write_bytes(png)
+            bounds_sar = b
+            log.info("  \u2713 SAR saved")
+        except Exception as e:
+            log.exception("SAR render failed: %s", e)
+        finally:
+            cleanup_path(path, was_dl)
+
+    def _render_mask():
+        nonlocal bounds_mask, stats
+        path, was_dl = open_for_read(scene["mask_key"])
+        try:
+            if not mask_png.exists():
+                log.info("Rendering mask for %s ...", sid)
+                arr, b, _ = read_tif_to_array(path, MAX_SAR_DIM)
+                bounds_mask = b
+                mask_bin = np.nan_to_num(arr, nan=0) >= MASK_THRESHOLD
+                h_m, w_m = arr.shape
+                rgba = np.zeros((h_m, w_m, 4), dtype=np.uint8)
+                rgba[mask_bin, 0] = MASK_COLOR_RGBA[0]
+                rgba[mask_bin, 1] = MASK_COLOR_RGBA[1]
+                rgba[mask_bin, 2] = MASK_COLOR_RGBA[2]
+                rgba[mask_bin, 3] = MASK_COLOR_RGBA[3]
+                img = Image.fromarray(rgba, "RGBA")
+                bio = BytesIO()
+                img.save(bio, format="PNG")
+                mask_png.write_bytes(bio.getvalue())
+                log.info("  \u2713 Mask saved (amber RGBA, %d oil pixels)", int(mask_bin.sum()))
+                # Compute stats from the SAME decimated array — avoids a second
+                # full mask download just for coverage statistics.
+                # Compute stats from original TIF (correct pixel size/CRS)
+                # We have the local path still open — pass it to compute_oil_stats
+                # which reads the original unresampled data with correct metadata.
+                try:
+                    stats = compute_oil_stats(path)
+                except Exception as stats_err:
+                    log.warning("  Stats from original TIF failed (%s), using decimated array fallback", stats_err)
+                    oil_px   = int(np.sum(arr >= MASK_THRESHOLD))
+                    valid_px = int(np.isfinite(arr).sum())
+                    total_px = int(arr.size)
+                    stats = {"oil_pixels": oil_px, "valid_pixels": valid_px,
+                             "total_pixels": total_px,
+                             "oil_area_km2": None, "coverage_pct": None,
+                             "pixel_size_m": None}
+            else:
+                stats = compute_oil_stats(path)
+        except Exception as e:
+            log.exception("Mask render failed: %s", e)
+            raise
+        finally:
+            cleanup_path(path, was_dl)
+
+    # Render SAR and mask concurrently — they're independent S3 reads, so
+    # running them in parallel roughly halves the wall-clock wait versus
+    # the original sequential download → render → download → render flow.
+    from concurrent.futures import ThreadPoolExecutor
+    errors = []
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [ex.submit(_render_mask)]
+        if scene["has_sar"] and not sar_png.exists():
+            futs.append(ex.submit(_render_sar))
+        for f in futs:
+            try:
+                f.result()
+            except Exception as e:
+                errors.append(e)
+
+    if not mask_png.exists():
+        raise HTTPException(500, "Mask render failed")
+
+    if stats is None:
+        stats = {"oil_pixels": None, "total_pixels": None,
+                  "oil_area_km2": None, "coverage_pct": None}
+    
+    # Main bounds (prefer mask)
+    bounds = bounds_mask or bounds_sar or scene.get("bounds") or [-10, -50, 0, -30]
+    sar_bounds = bounds_sar or bounds
+    mask_bounds = bounds_mask or bounds
+    
+    s, w, n, e = bounds
+    meta = {
+        "scene_id": sid,
+        "date": scene["date"],
+        "time": scene["time"],
+        "has_sar": scene["has_sar"],
+        "bounds": [s, w, n, e],
+        "sar_bounds": list(sar_bounds),
+        "mask_bounds": list(mask_bounds),
+        "center": [(s+n)/2, (w+e)/2],
+        **stats,
+        "sar_png_url": f"/api/scene/{sid}/sar.png" if scene["has_sar"] else None,
+        "mask_png_url": f"/api/scene/{sid}/mask.png",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    meta_path.write_text(json.dumps(meta))
+    return meta
+
+
+# =============================================================================
+# FASTAPI
+# =============================================================================
+app = FastAPI(title="Oil Spill Segmentation Viewer")
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_methods=["*"], allow_headers=["*"])
+
+@app.get("/api/health")
+def health():
+    try:
+        return {"status": "ok", "bucket": S3_BUCKET, "endpoint": S3_ENDPOINT,
+                "scene_count": len(list_scenes()),
+                "sar_stretch_mode": SAR_STRETCH_MODE}
+    except Exception as e:
+        return JSONResponse(200, {"status": "error", "error": str(e)})
+
+@app.get("/api/scenes")
+def api_scenes(refresh: bool = Query(False)):
+    scenes = list_scenes(force=refresh)
+    return {"count": len(scenes), "scenes": scenes}
+
+@app.get("/api/scene/{scene_id}/overlay")
+def api_overlay(scene_id: str):
+    return get_overlay(scene_id)
+
+def _serve_png_from_s3_or_disk(scene_id: str, kind: str):
+    """Serve PNG — S3 pre-cache first, then local disk cache."""
+    # Try S3 pre-cache
+    if USE_S3_CACHE:
+        try:
+            s3c = _s3()
+            key = f"{S3_CACHE_ROOT}/{scene_id}/{kind}.png"
+            resp = s3c.get_object(Bucket=S3_BUCKET, Key=key)
+            data = resp["Body"].read()
+            return Response(content=data, media_type="image/png",
+                            headers={"Cache-Control": "public, max-age=86400"})
+        except Exception:
+            pass
+    # Fall back to local disk cache
+    p = CACHE_DIR / scene_id / f"{kind}.png"
+    if p.exists():
+        return FileResponse(str(p), media_type="image/png",
+                            headers={"Cache-Control": "public, max-age=86400"})
+    return None
+
+@app.get("/api/scene/{scene_id}/sar.png")
+def api_sar(scene_id: str):
+    result = _serve_png_from_s3_or_disk(scene_id, "sar")
+    if result:
+        return result
+    get_overlay(scene_id)
+    p = CACHE_DIR / scene_id / "sar.png"
+    if not p.exists():
+        raise HTTPException(404, "No SAR for this scene")
+    return FileResponse(str(p), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+@app.get("/api/scene/{scene_id}/mask.png")
+def api_mask(scene_id: str):
+    result = _serve_png_from_s3_or_disk(scene_id, "mask")
+    if result:
+        return result
+    get_overlay(scene_id)
+    return FileResponse(str(CACHE_DIR / scene_id / "mask.png"),
+                        media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+log.info("Frontend: %s (exists=%s)", FRONTEND_DIR, FRONTEND_DIR.exists())
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+else:
+    @app.get("/")
+    def root():
+        return {"status": "running"}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", "8050"))
+    log.info("=" * 70)
+    log.info("  Oil Spill Segmentation Viewer  http://localhost:%d", port)
+    log.info("  SAR stretch mode: %s", SAR_STRETCH_MODE)
+    log.info("  Mask threshold: >= %d", MASK_THRESHOLD)
+    log.info("=" * 70)
+    # JupyterHub proxy support.
+    # JUPYTERHUB_SERVICE_PREFIX (e.g. "/user/<username>/") is the prefix for
+    # the notebook server itself -- it does NOT include the jupyter-server-proxy
+    # path segment. When this app is reached via
+    #   https://<jhub>/user/<username>/proxy/<port>/
+    # the actual external path prefix is JUPYTERHUB_SERVICE_PREFIX + "proxy/<port>/".
+    # Using JUPYTERHUB_SERVICE_PREFIX alone causes uvicorn/Starlette to build
+    # redirect/static/asset URLs missing the "proxy/<port>/" segment, which the
+    # proxy then 404s on.
+    jhub_prefix = os.environ.get("JUPYTERHUB_SERVICE_PREFIX", "")
+    if jhub_prefix:
+        root_path = jhub_prefix.rstrip("/") + f"/proxy/{port}/"
+    else:
+        # Fall back to explicit override if the user wants to set it directly.
+        root_path = os.environ.get("ROOT_PATH", "")
+    if root_path:
+        log.info("JupyterHub proxy prefix (root_path): %s", root_path)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info",
+                access_log=True, root_path=root_path)

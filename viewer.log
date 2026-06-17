@@ -1,0 +1,87 @@
+nohup: ignoring input
+============================================
+  Oil Spill Segmentation - UNet Model
+  Glodal Inc., Japan
+============================================
+
+Checking dependencies...
+[OK] Dependencies ready.
+
+──────────────────────────────────────────
+  Open in browser:
+  https://jupyter-sachin11-2dgeomatics/user/sachin11-geomatics/proxy/8050/
+
+  Or via JupyterHub dashboard:
+  <your-jhub-url>/user/jovyan/proxy/8050/
+──────────────────────────────────────────
+
+  Press Ctrl+C to stop the server.
+
+[PROJ] WARN: Anaconda proj.db not found
+2026-06-17 04:12:47,891 | INFO | Frontend: /home/jovyan/shared/Sachin_Rayamajhi/OIL SPILL SEGMENTATION_1BAND/Pre_step_before_web/oilspill_viewer/oilspill_viewer/frontend (exists=True)
+2026-06-17 04:12:47,904 | INFO | ======================================================================
+2026-06-17 04:12:47,904 | INFO |   Oil Spill Segmentation Viewer  http://localhost:8050
+2026-06-17 04:12:47,904 | INFO |   SAR stretch mode: minmax
+2026-06-17 04:12:47,904 | INFO |   Mask threshold: >= 128
+2026-06-17 04:12:47,905 | INFO | ======================================================================
+2026-06-17 04:12:47,905 | INFO | JupyterHub proxy prefix (root_path): /user/sachin11-geomatics/proxy/8050/
+INFO:     Started server process [7080]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8050 (Press CTRL+C to quit)
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050// HTTP/1.1" 200 OK
+2026-06-17 04:12:58,721 | INFO | Listing scenes from S3...
+2026-06-17 04:12:58,743 | INFO | Listing scenes from S3...
+2026-06-17 04:12:59,176 | INFO | Indexed 21 scenes, 21 with SAR
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/health HTTP/1.1" 200 OK
+2026-06-17 04:12:59,196 | INFO | Indexed 21 scenes, 21 with SAR
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scenes HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050// HTTP/1.1" 304 Not Modified
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scenes HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/health HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050// HTTP/1.1" 304 Not Modified
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scenes HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/health HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050// HTTP/1.1" 304 Not Modified
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/health HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scenes HTTP/1.1" 200 OK
+2026-06-17 04:13:34,050 | INFO |   ✓ Serving S1A_IW_GRDH_1SDV_20190918T083946_20190918T084014_029073_034CB2_4AB3 from S3 pre-cache
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083946_20190918T084014_029073_034CB2_4AB3/overlay HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083946_20190918T084014_029073_034CB2_4AB3/mask.png?t=1781669615396 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083946_20190918T084014_029073_034CB2_4AB3/sar.png?t=1781669615396 HTTP/1.1" 200 OK
+2026-06-17 04:13:45,179 | INFO |   ✓ Serving S1A_IW_GRDH_1SDV-vv-20190918T083921_20190918T083946_029073_034CB2_54A8_Sigma0 from S3 pre-cache
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV-vv-20190918T083921_20190918T083946_029073_034CB2_54A8_Sigma0/overlay HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV-vv-20190918T083921_20190918T083946_029073_034CB2_54A8_Sigma0/mask.png?t=1781669626661 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV-vv-20190918T083921_20190918T083946_029073_034CB2_54A8_Sigma0/sar.png?t=1781669626661 HTTP/1.1" 200 OK
+2026-06-17 04:13:54,446 | INFO |   ✓ Serving S1A_IW_GRDH_1SDV_20190918T083946_20190918T084014_029073_034CB2_4AB3 from S3 pre-cache
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083946_20190918T084014_029073_034CB2_4AB3/overlay HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083946_20190918T084014_029073_034CB2_4AB3/mask.png?t=1781669636372 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083946_20190918T084014_029073_034CB2_4AB3/sar.png?t=1781669636372 HTTP/1.1" 200 OK
+2026-06-17 04:13:58,518 | INFO |   ✓ Serving S1A_IW_GRDH_1SDV-vv-20190918T083921_20190918T083946_029073_034CB2_54A8_Sigma0 from S3 pre-cache
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV-vv-20190918T083921_20190918T083946_029073_034CB2_54A8_Sigma0/overlay HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV-vv-20190918T083921_20190918T083946_029073_034CB2_54A8_Sigma0/mask.png?t=1781669639859 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV-vv-20190918T083921_20190918T083946_029073_034CB2_54A8_Sigma0/sar.png?t=1781669639859 HTTP/1.1" 200 OK
+2026-06-17 04:14:02,297 | INFO |   ✓ Serving S1A_IW_GRDH_1SDV_20190918T083921_20190918T083946_029073_034CB2_54A8 from S3 pre-cache
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083921_20190918T083946_029073_034CB2_54A8/overlay HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083921_20190918T083946_029073_034CB2_54A8/mask.png?t=1781669645719 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083921_20190918T083946_029073_034CB2_54A8/sar.png?t=1781669645719 HTTP/1.1" 200 OK
+2026-06-17 04:14:13,941 | INFO |   ✓ Serving S1A_IW_GRDH_1SDV_20190918T083856_20190918T083921_029073_034CB2_76C9 from S3 pre-cache
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083856_20190918T083921_029073_034CB2_76C9/overlay HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083856_20190918T083921_029073_034CB2_76C9/mask.png?t=1781669655317 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083856_20190918T083921_029073_034CB2_76C9/sar.png?t=1781669655317 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scenes HTTP/1.1" 200 OK
+2026-06-17 04:15:30,136 | INFO | Listing scenes from S3...
+2026-06-17 04:15:30,333 | INFO | Indexed 21 scenes, 21 with SAR
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scenes HTTP/1.1" 200 OK
+2026-06-17 04:15:31,389 | INFO |   ✓ Serving S1A_IW_GRDH_1SDV_20190918T083921_20190918T083946_029073_034CB2_54A8 from S3 pre-cache
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083921_20190918T083946_029073_034CB2_54A8/overlay HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083921_20190918T083946_029073_034CB2_54A8/mask.png?t=1781669732733 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190918T083921_20190918T083946_029073_034CB2_54A8/sar.png?t=1781669732733 HTTP/1.1" 200 OK
+2026-06-17 04:15:36,564 | INFO |   ✓ Serving S1A_IW_GRDH_1SDV_20190913T083129_20190913T083154_029000_034A1E_88F0 from S3 pre-cache
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190913T083129_20190913T083154_029000_034A1E_88F0/overlay HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190913T083129_20190913T083154_029000_034A1E_88F0/mask.png?t=1781669744790 HTTP/1.1" 200 OK
+INFO:     ::ffff:10.1.214.166:0 - "GET /user/sachin11-geomatics/proxy/8050//api/scene/S1A_IW_GRDH_1SDV_20190913T083129_20190913T083154_029000_034A1E_88F0/sar.png?t=1781669744790 HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [7080]

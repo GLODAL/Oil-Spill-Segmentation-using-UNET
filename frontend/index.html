@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Oil Spill Segmentation — UNet Model</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+/* ── TOKENS ─────────────────────────────────────────────── */
+:root {
+  --bg:    #0d1117;
+  --surf:  #161b22;
+  --panel: #1c2430;
+  --bdr:   #21262d;
+  --bdr2:  #30363d;
+  --acc:   #1f6feb;   /* blue — map/data feel */
+  --acc2:  #f5a623;   /* amber — oil spill colour */
+  --grn:   #3fb950;
+  --red:   #f85149;
+  --txt:   #c9d1d9;
+  --txt2:  #8b949e;
+  --sw:    290px;
+  --hh:    54px;
+  --rw:    268px;
+  --mono:  'Courier New', monospace;
+  --sans:  'Segoe UI', system-ui, sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { font-family: var(--sans); background: var(--bg); color: var(--txt);
+       display: flex; flex-direction: column; }
+
+/* ── HEADER ─────────────────────────────────────────────── */
+#hdr {
+  height: var(--hh); flex-shrink: 0; background: var(--surf);
+  border-bottom: 1px solid var(--bdr); display: flex; align-items: center;
+  gap: 10px; padding: 0 14px; z-index: 900;
+}
+#togsb {
+  background: none; border: 1px solid var(--bdr2); border-radius: 5px;
+  color: var(--txt); cursor: pointer; width: 34px; height: 30px;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 4px; flex-shrink: 0; transition: border-color .15s;
+}
+#togsb:hover { border-color: var(--acc); }
+#togsb span { display: block; width: 16px; height: 2px; background: var(--txt); border-radius: 1px; }
+.logo-wrap { display: flex; align-items: center; gap: 8px; }
+.logo-icon { width: 32px; height: 32px; border-radius: 7px; background: var(--acc2);
+             display: flex; align-items: center; justify-content: center;
+             font-size: 14px; flex-shrink: 0; }
+.logo-text strong { display: block; font-size: 13px; color: #e6edf3; letter-spacing: .04em; line-height: 1.15; }
+.logo-text small { font-size: 9px; color: var(--txt2); text-transform: uppercase; letter-spacing: .12em; }
+.hdr-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.status-wrap { display: flex; align-items: center; gap: 6px; }
+.sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--grn); animation: pulse 2s infinite; }
+.sdot.off { background: var(--red); animation: none; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+.stxt { font-size: 10px; color: var(--txt2); }
+.co-tag { font-size: 10px; color: var(--txt2); font-weight: 700; letter-spacing: .1em;
+          border-left: 1px solid var(--bdr2); padding-left: 12px; }
+.exp-btn { padding: 6px 16px; background: var(--acc2); border: none; border-radius: 6px;
+           color: #111; font-weight: 700; font-size: 12px; cursor: pointer; transition: opacity .15s; }
+.exp-btn:hover { opacity: .85; }
+
+/* ── LAYOUT ─────────────────────────────────────────────── */
+#lay { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+
+/* ── LEFT SIDEBAR ───────────────────────────────────────── */
+#sb {
+  width: var(--sw); flex-shrink: 0; background: var(--surf);
+  border-right: 1px solid var(--bdr); overflow: hidden;
+  transition: width .22s ease, opacity .22s ease;
+  display: flex; flex-direction: column;
+}
+#sb.closed { width: 0; opacity: 0; pointer-events: none; }
+
+.sb-sec { padding: 12px 13px; flex-shrink: 0; }
+.sb-sec.grow { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 8px; }
+.sb-lbl { font-size: 9px; text-transform: uppercase; letter-spacing: .14em; color: var(--txt2);
+          margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; }
+.sb-divider { height: 1px; background: var(--bdr); flex-shrink: 0; }
+
+/* basemap select */
+.sb-select { width: 100%; background: var(--panel); border: 1px solid var(--bdr2);
+             border-radius: 5px; color: var(--txt); padding: 7px 9px;
+             font-size: 12px; outline: none; cursor: pointer; }
+.sb-select:focus { border-color: var(--acc); }
+
+/* search */
+.search-wrap { position: relative; margin-bottom: 8px; flex-shrink: 0; }
+.search-wrap::before { content: "⌕"; position: absolute; left: 9px; top: 50%;
+                        transform: translateY(-50%); color: var(--txt2); font-size: 14px; pointer-events: none; }
+.sb-search { width: 100%; background: var(--panel); border: 1px solid var(--bdr2);
+             border-radius: 5px; color: var(--txt); padding: 7px 9px 7px 28px;
+             font-size: 11px; font-family: var(--mono); outline: none; }
+.sb-search:focus { border-color: var(--acc); }
+.sb-search::placeholder { color: var(--txt2); }
+
+/* refresh btn */
+.refresh-btn { background: none; border: none; color: var(--acc); cursor: pointer;
+               font-size: 14px; line-height: 1; padding: 0; }
+.refresh-btn:hover { opacity: .7; }
+.refresh-btn.spin { animation: spinr .7s linear infinite; }
+@keyframes spinr { to { transform: rotate(360deg); } }
+
+/* scene list */
+#scenelist { flex: 1; overflow-y: auto; margin: 0 -13px; padding: 0 13px; min-height: 0; }
+#scenelist::-webkit-scrollbar { width: 4px; }
+#scenelist::-webkit-scrollbar-track { background: var(--bg); }
+#scenelist::-webkit-scrollbar-thumb { background: var(--bdr2); border-radius: 2px; }
+
+.scene-row {
+  padding: 9px 10px; border: 1px solid var(--bdr); border-radius: 6px; margin-bottom: 5px;
+  cursor: pointer; transition: border-color .14s, background .14s; background: var(--panel);
+}
+.scene-row:hover { border-color: var(--acc); background: rgba(31,111,235,.07); }
+.scene-row.active  { border-color: var(--acc2); background: rgba(245,166,35,.1); }
+.scene-row.loaded  { border-color: var(--acc2); background: rgba(245,166,35,.12); }
+.scene-row.loaded .sr-id { color: var(--acc2); }
+.scene-row.loaded .sr-date { color: var(--acc2); font-weight: 700; }
+.scene-row.loading { border-color: var(--acc); background: rgba(31,111,235,.08); opacity: .7; }
+.scene-badge-count { font-size: 9px; background: var(--acc2); color: #111;
+                     border-radius: 10px; padding: 1px 6px; font-weight: 700; margin-left: 4px; }
+.sr-id { font-family: var(--mono); font-size: 9.5px; color: var(--txt); line-height: 1.45;
+         word-break: break-all; }
+.sr-bottom { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; }
+.sr-date { font-size: 10px; color: var(--acc); font-family: var(--mono); }
+.sr-badge { font-size: 8px; color: var(--txt2); text-transform: uppercase; letter-spacing: .06em;
+            padding: 1px 5px; border: 1px solid var(--bdr2); border-radius: 3px; }
+.sr-badge.nosar { color: var(--red); border-color: rgba(248,81,73,.35); }
+.sr-remove { font-size: 9px; color: var(--red); cursor: pointer; padding: 0 3px;
+             line-height: 1; border-radius: 3px; transition: background .1s; }
+.sr-remove:hover { background: rgba(248,81,73,.2); }
+.sc-empty { font-size: 11px; color: var(--txt2); text-align: center; padding: 24px 0; }
+#scenecount { font-size: 9px; color: var(--txt2); font-weight: 400; letter-spacing: 0; text-transform: none; }
+
+/* ── MAP AREA ───────────────────────────────────────────── */
+#main { flex: 1; overflow: hidden; min-width: 0; display: flex; flex-direction: column; }
+#mapc { flex: 1; position: relative; overflow: hidden; }
+#map  { width: 100%; height: 100%; background: #0d1117; }
+
+/* floating map controls */
+.map-btns { position: absolute; top: 12px; left: 12px; z-index: 500;
+             display: flex; flex-direction: column; gap: 5px; }
+.mbtn { width: 32px; height: 32px; background: var(--surf); border: 1px solid var(--bdr2);
+        border-radius: 6px; color: var(--txt); cursor: pointer; display: flex;
+        align-items: center; justify-content: center; font-size: 15px; font-weight: 700;
+        transition: background .12s, border-color .12s; }
+.mbtn:hover { background: var(--panel); border-color: var(--acc); }
+
+#coord-bar { position: absolute; bottom: 10px; left: 12px; z-index: 400;
+             background: rgba(13,17,23,.88); border: 1px solid var(--bdr2); padding: 5px 10px;
+             border-radius: 5px; font-family: var(--mono); font-size: 10px; color: var(--txt2); }
+#hint-bar { position: absolute; bottom: 38px; left: 50%; transform: translateX(-50%); z-index: 400;
+            background: rgba(13,17,23,.9); border: 1px solid var(--bdr2); padding: 8px 18px;
+            border-radius: 6px; font-size: 11px; color: var(--txt2); pointer-events: none;
+            white-space: nowrap; transition: opacity .2s; }
+#hint-bar.hidden { opacity: 0; pointer-events: none; }
+
+#loadbar { display: none; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+           z-index: 600; background: var(--bdr); overflow: hidden; }
+#loadbar.show { display: block; }
+#loadbar::after { content: ""; position: absolute; height: 100%; width: 38%;
+                  background: var(--acc2); animation: sweep 1s ease-in-out infinite; }
+@keyframes sweep { 0%{left:-38%} 100%{left:100%} }
+#loadbar-msg { display: none; position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+               z-index: 600; background: rgba(0,0,0,.75); color: #fff; font-size: 12px;
+               padding: 6px 12px; border-radius: 6px; max-width: 80%; text-align: center; }
+#loadbar-msg.show { display: block; }
+
+/* ── RIGHT PANEL ────────────────────────────────────────── */
+#rp { width: var(--rw); flex-shrink: 0; background: var(--surf);
+      border-left: 1px solid var(--bdr); overflow-y: auto; display: flex; flex-direction: column; }
+#rp::-webkit-scrollbar { width: 4px; }
+#rp::-webkit-scrollbar-track { background: var(--bg); }
+#rp::-webkit-scrollbar-thumb { background: var(--bdr2); border-radius: 2px; }
+
+.rp-sec { padding: 12px 13px; border-bottom: 1px solid var(--bdr); }
+.rp-title { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .13em;
+            color: var(--acc); margin-bottom: 10px; }
+
+/* Legend */
+.lg-row { display: flex; align-items: center; gap: 9px; font-size: 11px; margin-bottom: 7px; }
+.lg-swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+.lg-meta { font-size: 9px; color: var(--txt2); margin-top: 8px; line-height: 1.75;
+           font-family: var(--mono); }
+
+/* Display toggles + sliders */
+.disp-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 11px; }
+.disp-row label { flex: 1; }
+.tgl { position: relative; width: 36px; height: 18px; flex-shrink: 0; }
+.tgl input { opacity: 0; width: 0; height: 0; }
+.tgl .sl { position: absolute; inset: 0; background: var(--bdr2); border-radius: 9px;
+           cursor: pointer; transition: background .18s; }
+.tgl input:checked + .sl { background: var(--acc); }
+.tgl .sl::before { content: ''; position: absolute; width: 14px; height: 14px;
+                   left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: transform .18s; }
+.tgl input:checked + .sl::before { transform: translateX(18px); }
+
+.op-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 11px; }
+.op-row label { flex: 1; color: var(--txt2); }
+.op-row input[type=range] { flex: 2; accent-color: var(--acc); cursor: pointer; }
+.op-val { font-family: var(--mono); font-size: 10px; color: var(--acc); min-width: 34px; text-align: right; }
+
+/* Scene info cards */
+.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.icard { background: var(--panel); border: 1px solid var(--bdr); border-radius: 6px;
+         padding: 9px 10px; }
+.icard.full { grid-column: 1/-1; }
+.icard lbl { font-size: 8px; text-transform: uppercase; letter-spacing: .1em; color: var(--txt2);
+             display: block; margin-bottom: 3px; }
+.icard .iv { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--txt); }
+.icard .iv.hi { color: var(--acc2); }
+.icard .iv-sm { font-family: var(--mono); font-size: 9px; color: var(--txt2);
+                word-break: break-all; line-height: 1.6; }
+#info-placeholder { font-size: 11px; color: var(--txt2); text-align: center; padding: 10px 0; }
+
+.ds-text { font-family: var(--mono); font-size: 9px; color: var(--txt2); line-height: 1.7; word-break: break-all; }
+
+/* Leaflet overrides */
+.leaflet-container { background: #0d1117 !important; }
+.leaflet-popup-content-wrapper { background: var(--surf); color: var(--txt); border: 1px solid var(--bdr2); }
+.leaflet-popup-tip { background: var(--surf); }
+.leaflet-control-attribution { background: rgba(13,17,23,.8) !important; color: var(--txt2) !important; }
+.leaflet-control-attribution a { color: var(--acc) !important; }
+</style>
+</head>
+<body>
+
+<!-- ════════════════ HEADER ════════════════ -->
+<header id="hdr">
+  <button id="togsb" title="Toggle scene panel">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="logo-wrap">
+    <div class="logo-icon">🛢</div>
+    <div class="logo-text">
+      <strong>Oil Spill Segmentation</strong>
+      <small>UNet Model · Sentinel-1 SAR</small>
+    </div>
+  </div>
+  <div class="hdr-right">
+    <div class="status-wrap">
+      <div class="sdot" id="sdot"></div>
+      <span class="stxt" id="stxt">Connecting…</span>
+    </div>
+    <span class="co-tag">GLODAL INC., JAPAN</span>
+    <button class="exp-btn" id="expbtn">⬇ Export</button>
+  </div>
+</header>
+
+<div id="lay">
+
+  <!-- ════════════════ LEFT SIDEBAR ════════════════ -->
+  <aside id="sb">
+    <div class="sb-sec">
+      <div class="sb-lbl">Map Layers</div>
+      <div class="sb-lbl" style="margin-bottom:4px;">Base Layer</div>
+      <select class="sb-select" id="basesel">
+        <option value="satellite">Satellite</option>
+        <option value="osm">OpenStreetMap</option>
+        <option value="dark">Dark</option>
+        <option value="terrain">Terrain</option>
+      </select>
+    </div>
+
+    <div class="sb-divider"></div>
+
+    <div class="sb-sec">
+      <div class="sb-lbl">SAR Scene</div>
+      <div class="sb-lbl">Scene ID</div>
+    </div>
+
+    <div class="sb-sec grow">
+      <div class="sb-lbl">
+        <span>SAR Scenes <span id="scenecount">(0)</span></span>
+        <button class="refresh-btn" id="refreshbtn" title="Reload from S3">↻</button>
+      </div>
+      <div class="search-wrap">
+        <input type="text" id="search" class="sb-search" placeholder="Search scene ID…"/>
+      </div>
+      <div id="scenelist">
+        <div class="sc-empty">Loading scenes…</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ════════════════ MAP ════════════════ -->
+  <div id="main">
+    <div id="mapc">
+      <div id="loadbar"></div>
+      <div id="loadbar-msg"></div>
+      <div id="map"></div>
+
+      <div class="map-btns">
+        <button class="mbtn" title="Zoom in"        onclick="map.zoomIn()">+</button>
+        <button class="mbtn" title="Zoom out"       onclick="map.zoomOut()">−</button>
+        <button class="mbtn" title="My location"    onclick="locateMe()" style="font-size:13px;">⌖</button>
+        <button class="mbtn" title="Fit to scene"   onclick="fitScene()" style="font-size:11px;">⊡</button>
+      </div>
+
+      <div id="coord-bar">Lat — &nbsp; Lon —</div>
+      <div id="hint-bar">← Click to load a scene · Click again to see its info · Double-click to remove</div>
+    </div>
+  </div>
+
+  <!-- ════════════════ RIGHT PANEL ════════════════ -->
+  <div id="rp">
+
+    <div class="rp-sec">
+      <div class="rp-title">Legend</div>
+      <div class="lg-row">
+        <div class="lg-swatch" style="background:#f5a623;"></div>
+        Detected Oil Spill
+      </div>
+      <div class="lg-row">
+        <div class="lg-swatch" style="background:#aaa;"></div>
+        SAR VV Backscatter (σ⁰ dB)
+      </div>
+      <div class="lg-meta">
+        Model: UNet · Epoch 300<br/>
+        Post-process: Morphological v15<br/>
+        Source: Sentinel-1 GRD IW
+      </div>
+    </div>
+
+    <div class="rp-sec">
+      <div class="rp-title">Display</div>
+
+      <div class="disp-row">
+        <label>SAR VV Preview</label>
+        <label class="tgl"><input type="checkbox" id="togSar" checked/><span class="sl"></span></label>
+      </div>
+      <div class="op-row">
+        <label>SAR Opacity</label>
+        <input type="range" min="0" max="100" value="75" id="opSar"/>
+        <span class="op-val" id="opSarV">75%</span>
+      </div>
+
+      <div class="disp-row" style="margin-top:6px;">
+        <label>Oil Mask</label>
+        <label class="tgl"><input type="checkbox" id="togMask" checked/><span class="sl"></span></label>
+      </div>
+      <div class="op-row">
+        <label>Mask Opacity</label>
+        <input type="range" min="0" max="100" value="85" id="opMask"/>
+        <span class="op-val" id="opMaskV">85%</span>
+      </div>
+    </div>
+
+    <div class="rp-sec" id="info-sec">
+      <div class="rp-title">Scene Info</div>
+      <div id="info-placeholder">Select a scene to view details</div>
+      <div id="active-scenes-list" style="margin-bottom:8px;display:none;"></div>
+      <div id="info-data" style="display:none;">
+        <div class="info-grid">
+          <div class="icard">
+            <lbl>Oil Area</lbl>
+            <div class="iv hi" id="iv-area">—</div>
+          </div>
+          <div class="icard">
+            <lbl>Coverage</lbl>
+            <div class="iv" id="iv-cov">—</div>
+          </div>
+          <div class="icard full">
+            <lbl>Scene ID</lbl>
+            <div class="iv-sm" id="iv-id">—</div>
+          </div>
+          <div class="icard">
+            <lbl>Date</lbl>
+            <div class="iv" style="font-size:12px;" id="iv-date">—</div>
+          </div>
+          <div class="icard">
+            <lbl>Time (UTC)</lbl>
+            <div class="iv" style="font-size:12px;" id="iv-time">—</div>
+          </div>
+          <div class="icard full">
+            <lbl>Centroid</lbl>
+            <div class="iv-sm" id="iv-loc">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="rp-sec">
+      <div class="rp-title">Data Source</div>
+      <div class="ds-text" id="datasrc">—</div>
+    </div>
+
+  </div><!-- #rp -->
+
+</div><!-- #lay -->
+
+<script>
+// ── CONFIG ────────────────────────────────────────────────────────────────
+// API_BASE auto-detection:
+//   • JupyterHub: served via /user/<name>/proxy/<port>/ — fetch() calls below
+//     use path-absolute URLs like `${API_BASE}/api/scenes`. A path-absolute
+//     URL ("/api/scenes") resolves against the ORIGIN, not the current
+//     directory, so it would skip right over "/user/<name>/proxy/<port>/"
+//     and hit the JupyterHub root instead. API_BASE must therefore carry
+//     that proxy prefix explicitly when running under /proxy/.
+//   • Windows localhost: falls back to http://localhost:8050
+//   • Set window.OILSENSE_API_BASE before this script to override manually
+(function() {
+  if (window.OILSENSE_API_BASE !== undefined) return;  // manual override
+  const loc = window.location;
+  const proxyMatch = loc.pathname.match(/^(.*\/proxy\/\d+)\/?/);
+  if (proxyMatch) {
+    // e.g. "/user/sachin11-geomatics/proxy/8050" — no trailing slash,
+    // so API_BASE + "/api/scenes" => ".../proxy/8050/api/scenes"
+    window.OILSENSE_API_BASE = proxyMatch[1];
+  } else if (loc.port === "8050") {
+    window.OILSENSE_API_BASE = "";   // direct same-origin (local, no proxy)
+  } else {
+    window.OILSENSE_API_BASE = "http://localhost:8050";  // Windows dev fallback
+  }
+})();
+const API_BASE = window.OILSENSE_API_BASE;
+
+// ── STATE ─────────────────────────────────────────────────────────────────
+let map, baseLayers = {};
+let allScenes = [];
+// Multi-scene support:
+//   loadedScenes  Map<scene_id, { meta, sarLayer, maskLayer, rowEl }>
+//   lastClickedId string — scene whose info is shown in the right panel
+const loadedScenes = new Map();
+let lastClickedId  = null;
+
+// ── MAP INIT ──────────────────────────────────────────────────────────────
+function initMap() {
+  map = L.map("map", { zoomControl: false, attributionControl: true }).setView([0, 0], 3);
+
+  baseLayers.satellite = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    { attribution: "Esri", maxZoom: 19 });
+  baseLayers.osm = L.tileLayer(
+    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    { attribution: "© OpenStreetMap", maxZoom: 19 });
+  baseLayers.dark = L.tileLayer(
+    "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+    { attribution: "© CartoDB", maxZoom: 19 });
+  baseLayers.terrain = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+    { attribution: "Esri", maxZoom: 19 });
+  baseLayers.satellite.addTo(map);
+
+  map.on("mousemove", e => {
+    document.getElementById("coord-bar").textContent =
+      `Lat ${e.latlng.lat.toFixed(4)}   Lon ${e.latlng.lng.toFixed(4)}`;
+  });
+}
+
+document.getElementById("basesel").onchange = e => {
+  Object.values(baseLayers).forEach(l => map.removeLayer(l));
+  baseLayers[e.target.value].addTo(map);
+};
+
+function locateMe() {
+  if (!navigator.geolocation) { alert("Geolocation unavailable."); return; }
+  navigator.geolocation.getCurrentPosition(pos => {
+    map.flyTo([pos.coords.latitude, pos.coords.longitude], 11, { duration: 1.2 });
+    L.circleMarker([pos.coords.latitude, pos.coords.longitude],
+      { radius: 7, color: "#1f6feb", fillColor: "#1f6feb", fillOpacity: .6 })
+      .addTo(map).bindPopup("You are here").openPopup();
+  }, err => alert("Location error: " + err.message));
+}
+
+function fitScene() {
+  // Fit to last-clicked scene, or all loaded scenes combined
+  if (lastClickedId && loadedScenes.has(lastClickedId)) {
+    flyToBounds(loadedScenes.get(lastClickedId).meta.bounds);
+  } else if (loadedScenes.size > 0) {
+    const all = [...loadedScenes.values()].map(e => e.meta.bounds).filter(Boolean);
+    if (!all.length) return;
+    const s = Math.min(...all.map(b=>b[0])), w = Math.min(...all.map(b=>b[1]));
+    const n = Math.max(...all.map(b=>b[2])), e = Math.max(...all.map(b=>b[3]));
+    flyToBounds([s, w, n, e]);
+  }
+}
+
+function flyToBounds(b) {
+  // b = [south, west, north, east]
+  map.flyToBounds([[b[0], b[1]], [b[2], b[3]]], { duration: 1.4, maxZoom: 13, padding: [40, 40] });
+}
+
+// ── SCENE LIST ────────────────────────────────────────────────────────────
+async function loadScenes(force = false) {
+  const btn = document.getElementById("refreshbtn");
+  btn.classList.add("spin");
+  try {
+    const r = await fetch(`${API_BASE}/api/scenes${force ? "?refresh=true" : ""}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    allScenes = d.scenes || [];
+    document.getElementById("scenecount").textContent = `(${allScenes.length})`;
+    renderList(document.getElementById("search").value);
+    setStatus(true, allScenes.length);
+  } catch(e) {
+    setStatus(false, 0, e.message);
+    document.getElementById("scenelist").innerHTML =
+      `<div class="sc-empty">Backend unreachable<br/><small>${e.message}</small></div>`;
+  } finally {
+    btn.classList.remove("spin");
+  }
+}
+
+function renderList(q = "") {
+  const el = document.getElementById("scenelist");
+  q = q.toLowerCase();
+  const filtered = q ? allScenes.filter(s => s.scene_id.toLowerCase().includes(q)) : allScenes;
+
+  if (!filtered.length) {
+    el.innerHTML = `<div class="sc-empty">No matches for "${q}"</div>`;
+    return;
+  }
+  el.innerHTML = "";
+  filtered.forEach(s => {
+    const row = document.createElement("div");
+    row.className = "scene-row";
+    const entry = loadedScenes.get(s.scene_id);
+    if (entry) row.classList.add("loaded");
+    if (s.scene_id === lastClickedId) row.classList.add("active");
+
+    row.dataset.sceneId = s.scene_id;
+    row.innerHTML = `
+      <div class="sr-id">${s.scene_id}</div>
+      <div class="sr-bottom">
+        <span class="sr-date">${s.date || "—"}</span>
+        ${s.has_sar ? '<span class="sr-badge">SAR ✓</span>' : '<span class="sr-badge nosar">no SAR</span>'}
+        ${entry ? '<span class="sr-badge on-map-badge" style="color:var(--acc2);border-color:var(--acc2);">ON MAP</span>' : ''}
+      </div>`;
+
+    // Single click → load/focus  |  Double-click → remove from map
+    // 300ms delay lets the browser detect dblclick before single-click fires.
+    let clickTimer = null;
+    row.addEventListener('click', () => {
+      clearTimeout(clickTimer);
+      clickTimer = setTimeout(() => toggleScene(s, row), 300);
+    });
+    row.addEventListener('dblclick', e => {
+      e.preventDefault();
+      clearTimeout(clickTimer);
+      removeSceneById(s.scene_id);
+    });
+    el.appendChild(row);
+  });
+}
+
+document.getElementById("search").addEventListener("input", e => renderList(e.target.value));
+document.getElementById("refreshbtn").onclick = () => loadScenes(true);
+
+// ── MULTI-SCENE MANAGEMENT ───────────────────────────────────────────────
+// Single click: toggle scene ON (load) or show info if already on
+// Double click: remove scene from map
+
+async function toggleScene(scene, rowEl) {
+  // If already loaded → show its info and fly to it (don't remove on single click)
+  if (loadedScenes.has(scene.scene_id)) {
+    lastClickedId = scene.scene_id;
+    fillInfoPanel(loadedScenes.get(scene.scene_id).meta);
+    flyToBounds(loadedScenes.get(scene.scene_id).meta.bounds);
+    refreshRowStyles();
+    return;
+  }
+  // Load it
+  await loadScene(scene, rowEl);
+}
+
+function removeSceneById(scene_id) {
+  // Look up the row by data attribute — avoids the wrong-row bug
+  const rowEl = document.querySelector(`.scene-row[data-scene-id="${scene_id}"]`);
+  removeScene(scene_id, rowEl);
+}
+
+function removeScene(scene_id, rowEl) {
+  const entry = loadedScenes.get(scene_id);
+  if (!entry) return;
+  if (entry.sarLayer)  { map.removeLayer(entry.sarLayer);  }
+  if (entry.maskLayer) { map.removeLayer(entry.maskLayer); }
+  loadedScenes.delete(scene_id);
+  if (lastClickedId === scene_id) {
+    lastClickedId = loadedScenes.size > 0 ? [...loadedScenes.keys()].at(-1) : null;
+    if (lastClickedId) fillInfoPanel(loadedScenes.get(lastClickedId).meta);
+    else resetInfoPanel();
+  }
+  refreshRowStyles();
+  updateActiveScenesPanel();
+}
+
+async function loadScene(scene, rowEl) {
+  document.getElementById("hint-bar").classList.add("hidden");
+  rowEl.classList.add("loading");
+  const sarOp  = document.getElementById("togSar").checked  ? document.getElementById("opSar").value/100  : 0;
+  const maskOp = document.getElementById("togMask").checked ? document.getElementById("opMask").value/100 : 0;
+  setLoading(true, `Loading ${scene.scene_id.slice(-8)}… (cached scenes load in <2s)`);
+
+  try {
+    const r = await fetch(`${API_BASE}/api/scene/${encodeURIComponent(scene.scene_id)}/overlay`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const meta = await r.json();
+    const ts   = "?t=" + Date.now();
+
+    let sarLayer = null, maskLayer = null;
+    if (meta.sar_png_url) {
+      const sb = meta.sar_bounds || meta.bounds;
+      sarLayer = L.imageOverlay(API_BASE + meta.sar_png_url + ts,
+                                [[sb[0],sb[1]],[sb[2],sb[3]]], { opacity: sarOp }).addTo(map);
+    }
+    if (meta.mask_png_url) {
+      const mb = meta.mask_bounds || meta.bounds;
+      maskLayer = L.imageOverlay(API_BASE + meta.mask_png_url + ts,
+                                 [[mb[0],mb[1]],[mb[2],mb[3]]], { opacity: maskOp }).addTo(map);
+    }
+
+    loadedScenes.set(scene.scene_id, { meta, sarLayer, maskLayer, rowEl });
+    lastClickedId = scene.scene_id;
+    fillInfoPanel(meta);
+    flyToBounds(meta.bounds);
+    refreshRowStyles();
+    updateActiveScenesPanel();
+  } catch(e) {
+    alert("Could not load scene: " + e.message);
+    rowEl.classList.remove("loading");
+  } finally {
+    setLoading(false);
+  }
+}
+
+function refreshRowStyles() {
+  // Re-stamp all visible rows with correct loaded/active/loading classes
+  document.querySelectorAll(".scene-row").forEach(row => {
+    const sid = row.querySelector(".sr-id")?.textContent?.trim();
+    if (!sid) return;
+    row.classList.remove("loaded","active","loading");
+    if (loadedScenes.has(sid)) row.classList.add("loaded");
+    if (sid === lastClickedId) row.classList.add("active");
+    // update ON MAP badge + ✕ remove button
+    row.querySelectorAll(".on-map-badge,.sr-remove").forEach(el => el.remove());
+    if (loadedScenes.has(sid)) {
+      const bottom = row.querySelector(".sr-bottom");
+      if (bottom) {
+        const badge = document.createElement("span");
+        badge.className = "sr-badge on-map-badge";
+        badge.style.cssText = "color:var(--acc2);border-color:var(--acc2);";
+        badge.textContent = "ON MAP";
+        bottom.appendChild(badge);
+        const btn = document.createElement("span");
+        btn.className = "sr-remove";
+        btn.title = "Remove from map";
+        btn.textContent = "✕";
+        btn.onclick = e => { e.stopPropagation(); removeSceneById(sid); };
+        bottom.appendChild(btn);
+      }
+    }
+  });
+}
+
+function updateActiveScenesPanel() {
+  const el = document.getElementById("active-scenes-list");
+  if (!el) return;
+  if (loadedScenes.size === 0) { el.style.display = "none"; return; }
+
+  el.style.display = "block";
+  el.innerHTML = `<div style="font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--acc);margin-bottom:6px;">
+    Active on map <span class="scene-badge-count">${loadedScenes.size}</span>
+    <span style="float:right;cursor:pointer;color:var(--red);font-size:10px;" onclick="clearAllScenes()">✕ clear all</span>
+  </div>` +
+    [...loadedScenes.entries()].map(([sid, entry]) => `
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:9px;
+                font-family:var(--mono);color:${sid===lastClickedId?'var(--acc2)':'var(--txt2)'};cursor:pointer;"
+         onclick="focusScene('${sid}')">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+            title="${sid}">${sid.slice(-20)}</span>
+      <span style="color:var(--txt2);">${entry.meta.date||''}</span>
+      <span style="color:var(--red);cursor:pointer;padding:0 2px;" 
+            onclick="event.stopPropagation();removeSceneById('${sid}')" 
+            title="Remove">✕</span>
+    </div>`).join("");
+}
+
+function focusScene(sid) {
+  if (!loadedScenes.has(sid)) return;
+  lastClickedId = sid;
+  fillInfoPanel(loadedScenes.get(sid).meta);
+  flyToBounds(loadedScenes.get(sid).meta.bounds);
+  refreshRowStyles();
+  updateActiveScenesPanel();
+}
+
+function clearAllScenes() {
+  loadedScenes.forEach(entry => {
+    if (entry.sarLayer)  map.removeLayer(entry.sarLayer);
+    if (entry.maskLayer) map.removeLayer(entry.maskLayer);
+  });
+  loadedScenes.clear();
+  lastClickedId = null;
+  resetInfoPanel();
+  refreshRowStyles();
+  updateActiveScenesPanel();
+}
+
+function fillInfoPanel(meta) {
+  document.getElementById("info-placeholder").style.display = "none";
+  document.getElementById("info-data").style.display = "block";
+  document.getElementById("iv-area").textContent = meta.oil_area_km2 != null ? meta.oil_area_km2 + " km²" : "—";
+  document.getElementById("iv-cov").textContent  = meta.coverage_pct  != null ? meta.coverage_pct  + "%" : "—";
+  document.getElementById("iv-id").textContent   = meta.scene_id;
+  document.getElementById("iv-date").textContent = meta.date || "—";
+  document.getElementById("iv-time").textContent = meta.time || "—";
+  document.getElementById("iv-loc").textContent  = meta.center
+    ? `${meta.center[0].toFixed(4)}, ${meta.center[1].toFixed(4)}` : "—";
+  const pxEl = document.getElementById("iv-px");
+  if (pxEl) pxEl.textContent = meta.pixel_size_m ? `${meta.pixel_size_m} m × ${meta.pixel_size_m} m` : "—";
+}
+
+function resetInfoPanel() {
+  document.getElementById("info-placeholder").style.display = "";
+  document.getElementById("info-data").style.display = "none";
+}
+
+// ── DISPLAY CONTROLS — affect ALL loaded scenes ──────────────────────────
+document.getElementById("togSar").onchange = e => {
+  const op = e.target.checked ? document.getElementById("opSar").value/100 : 0;
+  loadedScenes.forEach(entry => { if (entry.sarLayer) entry.sarLayer.setOpacity(op); });
+};
+document.getElementById("togMask").onchange = e => {
+  const op = e.target.checked ? document.getElementById("opMask").value/100 : 0;
+  loadedScenes.forEach(entry => { if (entry.maskLayer) entry.maskLayer.setOpacity(op); });
+};
+document.getElementById("opSar").oninput = e => {
+  document.getElementById("opSarV").textContent = e.target.value + "%";
+  if (document.getElementById("togSar").checked)
+    loadedScenes.forEach(entry => { if (entry.sarLayer) entry.sarLayer.setOpacity(e.target.value/100); });
+};
+document.getElementById("opMask").oninput = e => {
+  document.getElementById("opMaskV").textContent = e.target.value + "%";
+  if (document.getElementById("togMask").checked)
+    loadedScenes.forEach(entry => { if (entry.maskLayer) entry.maskLayer.setOpacity(e.target.value/100); });
+};
+
+// ── SIDEBAR TOGGLE ────────────────────────────────────────────────────────
+document.getElementById("togsb").onclick = () => {
+  document.getElementById("sb").classList.toggle("closed");
+  setTimeout(() => map.invalidateSize(), 230);
+};
+
+// ── EXPORT ────────────────────────────────────────────────────────────────
+document.getElementById("expbtn").onclick = () => {
+  html2canvas(document.getElementById("mapc"), {
+    useCORS: true, scale: 1.5, backgroundColor: "#0d1117"
+  }).then(canvas => {
+    const a    = document.createElement("a");
+    const name = lastClickedId || "oilspill_view";
+    a.href     = canvas.toDataURL("image/png");
+    a.download = `${name}_export.png`;
+    a.click();
+  }).catch(e => alert("Export failed: " + e.message));
+};
+
+// ── LOADING / STATUS ──────────────────────────────────────────────────────
+function setLoading(on, msg) {
+  const bar = document.getElementById("loadbar");
+  bar.classList.toggle("show", on);
+  const msgEl = document.getElementById("loadbar-msg");
+  if (msgEl) {
+    if (on && msg) { msgEl.textContent = msg; msgEl.classList.add("show"); }
+    else { msgEl.classList.remove("show"); }
+  }
+}
+function setStatus(ok, count, err) {
+  document.getElementById("sdot").classList.toggle("off", !ok);
+  document.getElementById("stxt").textContent = ok
+    ? `READY · ${count} scene${count !== 1 ? "s" : ""}`
+    : `OFFLINE${err ? " · " + err : ""}`;
+}
+
+// ── BOOT ──────────────────────────────────────────────────────────────────
+initMap();
+loadScenes();
+
+// Auto-refresh every 60s — picks up newly uploaded scenes automatically
+setInterval(() => loadScenes(false), 60_000);
+
+// Health check → data source footer
+(async () => {
+  try {
+    const d = await (await fetch(`${API_BASE}/api/health`)).json();
+    document.getElementById("datasrc").textContent =
+      `Bucket: ${d.bucket || "?"}\nEndpoint: ${d.endpoint || "?"}`;
+  } catch (_) {}
+})();
+</script>
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v833ccba57c9e4d2798f2e76cebdd09a11778172276447" integrity="sha512-57MDmcccJXYtNnH+ZiBwzC4jb2rvgVCEokYN+L/nLlmO8rfYT/gIpW2A569iJ/3b+0UEasghjuZH/ma3wIs/EQ==" data-cf-beacon='{"version":"2024.11.0","token":"7d5b3c9550ca416d90594e6532631df1","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
