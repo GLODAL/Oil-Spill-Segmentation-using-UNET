@@ -35,8 +35,8 @@ chmod +x start_viewer.sh
 Or manually:
 
 ```bash
-export AWS_ACCESS_KEY_ID="PB1VCH7O58UFUM53PTBT"
-export AWS_SECRET_ACCESS_KEY="vK3ZpOC94kcCj94TWTnwg5FvMk288BLCCKlvCfnj"
+export AWS_ACCESS_KEY_ID="*************"
+export AWS_SECRET_ACCESS_KEY="*****************"
 export AWS_DEFAULT_REGION="us-east-1"
 export AWS_REQUEST_CHECKSUM_CALCULATION="when_required"
 export S3_ENDPOINT="https://rgw.glodal-inc.net"
@@ -90,8 +90,8 @@ pkill -f "python3 app.py"
 ```bash
 cd ~/oilspill_viewer/oilspill_viewer && \
   pip install fastapi "uvicorn[standard]" boto3 rasterio Pillow numpy -q && \
-  AWS_ACCESS_KEY_ID=PB1VCH7O58UFUM53PTBT \
-  AWS_SECRET_ACCESS_KEY=vK3ZpOC94kcCj94TWTnwg5FvMk288BLCCKlvCfnj \
+  AWS_ACCESS_KEY_ID=************** \
+  AWS_SECRET_ACCESS_KEY=******************* \
   AWS_REQUEST_CHECKSUM_CALCULATION=when_required \
   S3_ENDPOINT=https://rgw.glodal-inc.net \
   S3_BUCKET=Inference_Oil_Spill_segmentation \
